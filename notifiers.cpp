@@ -142,6 +142,11 @@ void NotifierBase::add_endpoints(
 
     auto ncategory = omq->add_category("notifier", oxenmq::AuthLevel::basic);
 
+    // notifier.ack: the hivemind sends one after every batch of pushes and stops sending once a
+    // window of them is unacknowledged.  The reply is dispatched from the same queue as the
+    // pushes, in order, so it tells the hivemind that everything before it has been taken.
+    ncategory.add_request_command("ack", [](oxenmq::Message& m) { m.send_reply(); });
+
     ncategory.add_request_command(
             "validate", [this, token_error = std::move(token_error)](oxenmq::Message& m) {
                 // notifier.validate: Called when a device registered for push notifications.  We
@@ -424,8 +429,8 @@ void NotifierBase::run() {
 
     sd_notify(0, "STOPPING=1\nSTATUS=Shutting down");
 
-    // Stop OxenMQ first so that we won't get new incoming pushes.  Pushes will back up on the SPNS
-    // socket and get delivered to us when we restart and restablish the connection.
+    // Stop OxenMQ first so that we won't get new incoming pushes.  The hivemind holds pushes it
+    // cannot deliver and sends them once we restart and register again.
     log::info(cat, "Stopping OxenMQ...");
     omq.reset();
 }
