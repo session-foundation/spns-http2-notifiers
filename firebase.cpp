@@ -1,7 +1,4 @@
 #include <fmt/chrono.h>
-#include <oxenc/bt_producer.h>
-#include <oxenc/hex.h>
-#include <oxenmq/auth.h>
 #include <oxenmq/oxenmq.h>
 
 #include <CLI/CLI.hpp>
@@ -18,11 +15,6 @@
 #include "http2_notifier.hpp"
 #include "notifiers.hpp"
 #include "util.hpp"
-
-extern "C" {
-#include <pthread.h>
-#include <systemd/sd-daemon.h>
-}
 
 static auto cat = oxen::log::Cat("firebase");
 
@@ -67,177 +59,84 @@ int run(int argc, char* argv[]) {
 
     auto& omq = nb.init();
 
-    auto ncat = omq.add_category("notifier", oxenmq::AuthLevel::basic);
+    nb.add_endpoints(
+            *hn,
+            // A Firebase device token is an opaque non-empty string.
+            [](std::string_view token) -> std::optional<std::string> {
+                if (token.empty())
+                    return "Firebase device token cannot be empty";
+                return std::nullopt;
+            },
+            [](const notification& n, int code, const std::string& resp_body) {
+                // Error codes: see https://firebase.google.com/docs/reference/fcm/rest/v1/ErrorCode
+                switch (code) {
+                    case 200: return Outcome::success;
+                    case 400:
+                        // This is a generic "INVALID_ARGUMENT".  This could be a malformed request,
+                        // or an invalid token.  There's a deeply nested value in the body that
+                        // helps us distinguish:
+                        try {
+                            auto err_det0 = nlohmann::json::parse(resp_body)["error"]["details"][0];
+                            if (err_det0["@type"].get<std::string_view>() ==
+                                        "type.googleapis.com/google.firebase.fcm.v1.FcmError" &&
+                                err_det0["errorCode"].get<std::string_view>() ==
+                                        "INVALID_ARGUMENT") {
+                                log::warning(
+                                        cat,
+                                        "Device token {} is no longer valid; deleting it",
+                                        n.token);
+                                return Outcome::invalid_token;
+                            }
+                        } catch (...) {
+                        }
 
-    ncat.add_request_command("validate", [&nb](oxenmq::Message& m) {
-        // notifier.validate: Called when a device registered for push notifications.  We get passed
-        // some json containing the registration details.  Currently all we look for is a "token"
-        // key containing a non-empty string value.
-        //
-        // Returns a two-part or three-part value: a stringified numeric code from SUBSCRIBE, and an
-        // opaque value for the main SPNS to store and feed back to us when this account is to be
-        // notified.  (Currently we simply return the device token for this value).  The third value
-        // contains "extra" context data that will be fed back to us in push notifications if we
-        // provide it, but we currently don't provide it.
-
-        if (m.data.size() != 2) {
-            log::warning(cat, "Internal error: invalid input to notifier.validate");
-            m.send_reply("ERROR", "Invalid validate request data");
-            return;
-        }
-        if (m.data[0] != nb.id()) {
-            log::warning(
-                    cat,
-                    "Internal error: notifier validate called with unexpected notifier id '{}' != "
-                    "'{}'",
-                    m.data[0],
-                    nb.id());
-            m.send_reply("ERROR", "Invalid notifier value");
-            return;
-        }
-
-        std::string token;
-        try {
-            auto data = nlohmann::json::parse(m.data[1]);
-            token = data["token"].get<std::string>();
-        } catch (const std::exception& e) {
-            log::warning(cat, "Unable to parse notifier.validate JSON input: {}", e.what());
-            m.send_reply(
-                    "{}"_format(static_cast<int>(SUBSCRIBE::BAD_INPUT)),
-                    "Unparseable JSON notification request data");
-            return;
-        }
-        if (token.empty()) {
-            log::warning(cat, "notifier.validate called with empty notification token");
-            m.send_reply(
-                    "{}"_format(static_cast<int>(SUBSCRIBE::BAD_INPUT)),
-                    "Firebase device token cannot be empty");
-            return;
-        }
-        log::debug(cat, "notifier.validate validated token {}", token);
-        m.send_reply("{}"_format(static_cast<int>(SUBSCRIBE::OK)), token);
-    });
-
-    std::function<void(notification n, int code, std::string resp_body)> handle_response;
-    handle_response = [&nb, &hn, &handle_response](
-                              notification n, int code, std::string resp_body) {
-        bool invalid_token = false;
-        bool hit_quota = false;
-        // Error codes: see https://firebase.google.com/docs/reference/fcm/rest/v1/ErrorCode
-        switch (code) {
-            case 200:
-                nb.stats.success++;
-                if (n.attempts)
-                    nb.stats.retry_success++;
-                log::trace(cat, "sent notification to {}", n.token);
-                return;
-            case 400:
-                // This is a generic "INVALID_ARGUMENT".  This could be a malformed request, or an
-                // invalid token.  There's a deeply nested value in the body that helps us
-                // distinguish:
-                try {
-                    auto err_det0 = nlohmann::json::parse(resp_body)["error"]["details"][0];
-                    if (err_det0["@type"].get<std::string_view>() ==
-                                "type.googleapis.com/google.firebase.fcm.v1.FcmError" &&
-                        err_det0["errorCode"].get<std::string_view>() == "INVALID_ARGUMENT") {
+                        // Otherwise this is some other sort of error so log it and schedule a retry
                         log::warning(
-                                cat, "Device token {} is no longer valid; deleting it", n.token);
-                        invalid_token = true;
-                        break;
-                    }
-                } catch (...) {
+                                cat,
+                                "Notification request returned 400 error with body:\n{}",
+                                resp_body);
+                        return Outcome::retry;
+                    case 401:
+                        // THIRD_PARTY_AUTH_ERROR.  This seems to be for when you are deeply truely
+                        // cursed by having decided to use Firebase to send notifications to APNS to
+                        // make sure that both Google and Apple get to see all your notifications.
+                        log::warning(
+                                cat,
+                                "Notification request returned 401, this is unexpected!  Body:\n{}",
+                                resp_body);
+                        return Outcome::retry;
+                    case 403:
+                        // SENDER_ID_MISMATCH -- the client app registered for FCM but
+                        // apparently didn't include us as an allowed sender.
+                        log::warning(
+                                cat,
+                                "Device token {} has not authorized us to send "
+                                "notifications; deleting it",
+                                n.token);
+                        return Outcome::invalid_token;
+                    case 404:
+                        // UNREGISTERED -- the token is not registered, perhaps because the token
+                        // got refreshed, the app got uninstalled, etc.
+                        log::warning(
+                                cat, "Device token {} unregistered from FCM; deleting it", n.token);
+                        return Outcome::invalid_token;
+                    case 429:
+                        // QUOTA_EXCEEDED -- we hit some sort of quota, but it could be
+                        // either for this token specifically or for the project overall.
+                        log::warning(
+                                cat,
+                                "Exceeded quota sending to token {}; will retry in 60s",
+                                n.token);
+                        return Outcome::quota;
+                    default:
+                        log::warning(
+                                cat,
+                                "Error code {} while sending to token {}; will retry soon",
+                                code,
+                                n.token);
+                        return Outcome::retry;
                 }
-
-                // Otherwise this is some other sort of error so log it and schedule a retry
-                log::warning(
-                        cat, "Notification request returned 400 error with body:\n{}", resp_body);
-                break;
-            case 401:
-                // THIRD_PARTY_AUTH_ERROR.  This seems to be for when you are deeply truely cursed
-                // by having decided to use Firebase to send notifications to APNS to make sure that
-                // both Google and Apple get to see all your notifications.
-                log::warning(
-                        cat,
-                        "Notification request returned 401, this is unexpected!  Body:\n{}",
-                        resp_body);
-                break;
-            case 403:
-                // SENDER_ID_MISMATCH -- the client app registered for FCM but
-                // apparently didn't include us as an allowed sender.
-                log::warning(
-                        cat,
-                        "Device token {} has not authorized us to send "
-                        "notifications; deleting it",
-                        n.token);
-                invalid_token = true;
-                break;
-            case 404:
-                // UNREGISTERED -- the token is not registered, perhaps because the token got
-                // refreshed, the app got uninstalled, etc.
-                log::warning(cat, "Device token {} unregistered from FCM; deleting it", n.token);
-                invalid_token = true;
-                break;
-            case 429:
-                // QUOTA_EXCEEDED -- we hit some sort of quota, but it could be
-                // either for this token specifically or for the project overall.
-                log::warning(cat, "Exceeded quota sending to token {}; will retry in 60s", n.token);
-                hit_quota = true;
-                break;
-            default:
-                log::warning(
-                        cat,
-                        "Error code {} while sending to token {}; will retry soon",
-                        code,
-                        n.token);
-                break;
-        }
-
-        if (invalid_token) {
-            nb.stats.failures++;
-            nb.bad_token(n.token);
-            hn->ignore(std::move(n.token));
-            return;
-        }
-
-        double retry_seconds = 1 << n.attempts++;
-
-        // If we get here then it failed, but can be retried.  We use an exponential backoff with
-        // jitter, as per Google recommendations.
-        if (n.attempts >= MAX_ATTEMPTS) {
-            log::warning(
-                    cat,
-                    "Too many notification attempts ({}) for token {}; dropping notification",
-                    n.attempts,
-                    n.token);
-            nb.stats.failures++;
-            return;
-        }
-
-        if (hit_quota && retry_seconds < 60)
-            retry_seconds = 60;
-        retry_seconds *= retry_jitter(rng);
-
-        log::debug(cat, "Retrying push to token {} in {:.3f}s", n.token, retry_seconds);
-
-        auto retry_in = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::duration<double>{retry_seconds});
-
-        hn->send_later(retry_in, std::move(n), handle_response);
-    };
-
-    ncat.add_command("push", [&nb, &hn, &handle_response](oxenmq::Message& m) {
-        // notifier.push: Called to send a push notification.  This is a command rather than a
-        // request (i.e. it does not reply).  The message is a single part, bt-encoded dict (see
-        // comments in spns/hivemind.cpp).
-        try {
-            auto n = notification::parse_spns(m.data.at(0), nb.id());
-
-            hn->send(std::move(n), handle_response);
-
-        } catch (const std::exception& e) {
-            log::warning(cat, "Invalid push: {}", e.what());
-        }
-    });
+            });
 
     log::info(cat, "SPNS Firebase Notifier initialized, starting up");
 

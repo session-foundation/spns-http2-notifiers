@@ -9,9 +9,12 @@
 
 #include <CLI/CLI.hpp>
 #include <csignal>
+#include <nlohmann/json.hpp>
 #include <oxen/log.hpp>
 #include <oxen/log/format.hpp>
 
+#include "http2_notifier.hpp"
+#include "notification.hpp"
 #include "util.hpp"
 
 extern "C" {
@@ -126,6 +129,135 @@ oxenmq::OxenMQ& NotifierBase::init() {
 
     omq.emplace(std::move(pubkey), std::move(seckey), false, [](auto) { return ""s; });
     return *omq;
+}
+
+void NotifierBase::add_endpoints(
+        HTTP2Notifier& hn_,
+        std::function<std::optional<std::string>(std::string_view token)> token_error,
+        std::function<Outcome(const notification& n, int code, const std::string& body)>
+                classify_) {
+    hn = &hn_;
+    classify = std::move(classify_);
+    ncat = log::Cat(notifier_id);
+
+    auto ncategory = omq->add_category("notifier", oxenmq::AuthLevel::basic);
+
+    ncategory.add_request_command(
+            "validate", [this, token_error = std::move(token_error)](oxenmq::Message& m) {
+                // notifier.validate: Called when a device registered for push notifications.  We
+                // get passed some json containing the registration details.  Currently all we look
+                // for is a "token" key.
+                //
+                // Returns a two-part or three-part value: a stringified numeric code from
+                // SUBSCRIBE, and an opaque value for the main SPNS to store and feed back to us
+                // when this account is to be notified.  (Currently we simply return the device
+                // token for this value).  The third value contains "extra" context data that will
+                // be fed back to us in push notifications if we provide it, but we currently don't
+                // provide it.
+
+                if (m.data.size() != 2) {
+                    log::warning(ncat, "Internal error: invalid input to notifier.validate");
+                    m.send_reply("ERROR", "Invalid validate request data");
+                    return;
+                }
+                if (m.data[0] != id()) {
+                    log::warning(
+                            ncat,
+                            "Internal error: notifier validate called with unexpected notifier id "
+                            "'{}' != '{}'",
+                            m.data[0],
+                            id());
+                    m.send_reply("ERROR", "Invalid notifier value");
+                    return;
+                }
+
+                std::string token;
+                try {
+                    auto data = nlohmann::json::parse(m.data[1]);
+                    token = data["token"].get<std::string>();
+                } catch (const std::exception& e) {
+                    log::warning(
+                            ncat, "Unable to parse notifier.validate JSON input: {}", e.what());
+                    m.send_reply(
+                            "{}"_format(static_cast<int>(SUBSCRIBE::BAD_INPUT)),
+                            "Unparseable JSON notification request data");
+                    return;
+                }
+                if (auto err = token_error(token)) {
+                    log::warning(
+                            ncat,
+                            "notifier.validate called with invalid notification token '{}': {}",
+                            token,
+                            *err);
+                    m.send_reply("{}"_format(static_cast<int>(SUBSCRIBE::BAD_INPUT)), *err);
+                    return;
+                }
+                log::debug(ncat, "notifier.validate validated token {}", token);
+                m.send_reply("{}"_format(static_cast<int>(SUBSCRIBE::OK)), token);
+            });
+
+    ncategory.add_command("push", [this](oxenmq::Message& m) {
+        // notifier.push: Called to send a push notification.  This is a command rather than a
+        // request (i.e. it does not reply).  The message is a single part, bt-encoded dict (see
+        // comments in spns/hivemind.cpp).
+        try {
+            auto n = notification::parse_spns(m.data.at(0), id());
+
+            hn->send(std::move(n), [this](notification n, int code, std::string body) {
+                handle_response(std::move(n), code, std::move(body));
+            });
+
+        } catch (const std::exception& e) {
+            log::warning(ncat, "Invalid push: {}", e.what());
+        }
+    });
+}
+
+void NotifierBase::handle_response(notification n, int code, std::string body) {
+    auto outcome = classify(n, code, body);
+    switch (outcome) {
+        case Outcome::success:
+            stats.success++;
+            if (n.attempts)
+                stats.retry_success++;
+            log::trace(ncat, "successful notification to {}", n.token);
+            return;
+        case Outcome::invalid_token:
+            stats.failures++;
+            bad_token(n.token);
+            hn->ignore(std::move(n.token));
+            return;
+        case Outcome::quota:
+        case Outcome::retry: break;
+    }
+
+    double retry_seconds = 1 << n.attempts++;
+
+    // If we get here then it failed, but can be retried.  We use an exponential backoff with
+    // jitter, because that's a reasonable Google recommendation and because Apple, as usual, has
+    // no useful documented recommendation or instructions whatsoever.
+    if (n.attempts >= MAX_ATTEMPTS) {
+        log::warning(
+                ncat,
+                "Too many notification attempts ({}) for token {}; dropping notification",
+                n.attempts,
+                n.token);
+        stats.failures++;
+        return;
+    }
+
+    if (outcome == Outcome::quota && retry_seconds < 60)
+        retry_seconds = 60;
+    retry_seconds *= retry_jitter(rng);
+
+    log::debug(ncat, "Retrying push to token {} in {:.3f}s", n.token, retry_seconds);
+
+    auto retry_in = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::duration<double>{retry_seconds});
+
+    hn->send_later(retry_in, std::move(n), [this](notification n, int code, std::string body) {
+        handle_response(std::move(n), code, std::move(body));
+    });
 }
 
 void NotifierBase::start(oxen::quic::Loop& qloop) {
