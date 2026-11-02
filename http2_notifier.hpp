@@ -41,8 +41,6 @@ class HTTP2Notifier {
 
     std::chrono::milliseconds req_timeout = 10s;
 
-    std::shared_ptr<oxen::quic::Ticker> ignored_cleaner;
-
     static int handle_socket_c(CURL* easy, curl_socket_t s, int action, void* userp, void* socketp);
     static int start_timeout_c(CURLM* multi, long timeout_ms, void* userp);
     static void curl_perform_c(int /*fd*/, short event, void* cctx);
