@@ -4,6 +4,7 @@
 #include <oxenmq/oxenmq.h>
 
 #include <CLI/CLI.hpp>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -42,6 +43,9 @@ enum class SUBSCRIBE : int {
 // particularly useful.  (Also note that retries are not attempted across restarts).
 inline constexpr int MAX_ATTEMPTS = 11;
 
+// The version of the hivemind's register_service protocol we speak; the hivemind refuses any other.
+inline constexpr int REGISTER_PROTOCOL = 1;
+
 // Relative jitter for retry delay.  E.g. a draw from this returns 0.9 and our pre-jitter retry time
 // would be 8s, then we actually wait 7.2s.  Should be centered around 1.
 inline thread_local std::uniform_real_distribution<double> retry_jitter{0.75, 1.25};
@@ -72,6 +76,11 @@ class NotifierBase {
     std::unordered_set<std::string> bad_tokens;
 
     sigset_t sigset;
+
+    // Set when the hivemind refuses our registration, which stops the process (see run()).
+    std::atomic<bool> registration_refused = false;
+
+    void register_service();
 
     HTTP2Notifier* hn = nullptr;
     std::function<Outcome(const notification& n, int code, const std::string& body)> classify;
@@ -111,7 +120,8 @@ class NotifierBase {
                     classify);
 
     // Starts the oxenmq instance.  This will:
-    // - connect to hivemind and register the service
+    // - connect to hivemind and register the service, stopping the process (see run()) if the
+    //   hivemind refuses the registration
     // - start an oxenmq timer to periodically ping/reregister with hivemind and update service
     //   stats with hivemind.
     // - starts a periodic timer to propagate any bad tokens given with `bad_token()` back to
@@ -129,7 +139,10 @@ class NotifierBase {
     // sets up a signal handler to intercept INT and TERM signals to shut down gracefully and waits
     // forever for it to fire.  At that point it stops oxenmq (so that no new pushes will arrive)
     // and returns control, to allow the notifier to do any remaining cleanup it needs.
-    void run();
+    //
+    // Also returns, the same way, if the hivemind refuses our registration.  Returns the process
+    // exit status: 0 after a signal, 1 after a refused registration.
+    [[nodiscard]] int run();
 
     std::string_view id() const { return notifier_id; }
 

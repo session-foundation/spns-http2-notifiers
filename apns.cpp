@@ -161,14 +161,14 @@ int run(int argc, char* argv[]) {
             },
             50min);
 
-    nb.run();
+    int status = nb.run();
 
     log::info(cat, "Stopping HTTP2 notification client...");
     hn->stop();
     hn.reset();
     log::info(cat, "Shutdown complete.");
 
-    return 0;
+    return status;
 }
 
 }  // namespace spns::notifier::apns

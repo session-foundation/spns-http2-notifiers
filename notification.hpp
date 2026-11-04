@@ -1,10 +1,15 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace spns::notifier {
+
+// The most a body can be and still fit the push services' ~4kB payload caps once encrypted, padded
+// and base64-encoded.  The hivemind enforces its own limit; this is what we tell it we can carry.
+inline constexpr int64_t MAX_BODY = 2500;
 
 struct notification {
     std::string token;

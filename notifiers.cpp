@@ -1,5 +1,6 @@
 #include "notifiers.hpp"
 
+#include <oxenc/bt_producer.h>
 #include <oxenc/hex.h>
 #include <oxenmq/address.h>
 #include <oxenmq/oxenmq.h>
@@ -20,6 +21,7 @@
 extern "C" {
 #include <pthread.h>
 #include <systemd/sd-daemon.h>
+#include <unistd.h>
 }
 
 namespace spns::notifier {
@@ -296,11 +298,11 @@ void NotifierBase::start(oxen::quic::Loop& qloop) {
 
     log::info(cat, "Connected to SPNS hivemind");
 
-    omq->send(spns_cid, "admin.register_service", notifier_id);
+    register_service();
 
     omq->add_timer(
             [this] {
-                omq->send(spns_cid, "admin.register_service", notifier_id);
+                register_service();
 
                 std::map<std::string, int64_t> report;
 
@@ -379,7 +381,38 @@ void NotifierBase::start(oxen::quic::Loop& qloop) {
             15s);
 }
 
-void NotifierBase::run() {
+void NotifierBase::register_service() {
+    oxenc::bt_dict_producer params;
+    params.append("", REGISTER_PROTOCOL);
+    params.append("max_body", MAX_BODY);
+    omq->request(
+            spns_cid,
+            "admin.register_service",
+            [this](bool ok, std::vector<std::string> data) {
+                if (ok && data.empty())
+                    return;
+                // Only a timeout (which also covers a lost connection) is transient, as the
+                // hivemind may be restarting and the stats timer registers again; any other
+                // failure, like a refusal, is a deployment error that retrying cannot fix.
+                if (!ok && data.size() == 1 && data.front() == "TIMEOUT") {
+                    log::warning(cat, "Registration with the hivemind timed out; will retry");
+                    return;
+                }
+                auto reason = data.empty() ? "no reason given"s : data.front();
+                if (ok)
+                    log::critical(cat, "The hivemind refused our registration: {}", reason);
+                else
+                    log::critical(cat, "Registration with the hivemind failed: {}", reason);
+                // Signals are blocked in every thread for run()'s sigwait, so this has to be
+                // process-directed (raise() would leave it pending on this thread).
+                if (!registration_refused.exchange(true))
+                    kill(getpid(), SIGTERM);
+            },
+            notifier_id,
+            std::move(params).str());
+}
+
+int NotifierBase::run() {
     sd_notify(0, "READY=1\nSTATUS=Started");
 
     // Schedule our system status update timer through *both* OMQ and quic::Loop event loops so that
@@ -425,7 +458,10 @@ void NotifierBase::run() {
     // Run forever/until we get a signal to stop
     int signum = 0;
     sigwait(&sigset, &signum);
-    log::warning(cat, "Caught signal {}, shutting down", signum);
+    if (registration_refused)
+        log::warning(cat, "Shutting down after the hivemind refused our registration");
+    else
+        log::warning(cat, "Caught signal {}, shutting down", signum);
 
     sd_notify(0, "STOPPING=1\nSTATUS=Shutting down");
 
@@ -433,6 +469,8 @@ void NotifierBase::run() {
     // cannot deliver and sends them once we restart and register again.
     log::info(cat, "Stopping OxenMQ...");
     omq.reset();
+
+    return registration_refused ? 1 : 0;
 }
 
 void NotifierBase::bad_token(std::string token) {
