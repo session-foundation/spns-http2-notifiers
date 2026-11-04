@@ -69,21 +69,24 @@ notification notification::parse_spns(std::string_view data, std::string_view no
     auto msg_ns = d.require<int16_t>("n");
     auto ts = d.require<int64_t>("t");
     auto expiry = d.require<int64_t>("z");
+    // The message's full size, present only when the message exceeded the hivemind's body limit:
+    // with ~, the subscriber accepts truncated bodies and ~ is a prefix of the message (which the
+    // device recognizes by its being shorter than l); without it, the body was withheld.
+    auto full_size = d.maybe<int64_t>("}");
     // Registrations don't necessarily request data in notifications: if they didn't, this
     // will be omitted, otherwise it will be the encrypted message content (i.e. the data
-    // actually stored in the swarm).
+    // actually stored in the swarm).  The hivemind caps it to fit within the push services'
+    // payload limits, so no size check is made here.
     auto msg_data = d.maybe<std::string_view>("~");
     d.finish();
 
     nlohmann::json metadata{
             {"@", oxenc::to_hex(account)}, {"#", msg_id}, {"n", msg_ns}, {"t", ts}, {"z", expiry}};
     if (msg_data) {
-        auto len = msg_data->size();
-        metadata["l"] = len;
-        if (len > MAX_MSG_SIZE) {
-            metadata["B"] = true;
-            msg_data.reset();
-        }
+        metadata["l"] = full_size.value_or(msg_data->size());
+    } else if (full_size) {
+        metadata["l"] = *full_size;
+        metadata["B"] = true;
     }
 
     std::string payload;
