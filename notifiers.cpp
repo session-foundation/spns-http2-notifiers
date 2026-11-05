@@ -298,11 +298,11 @@ void NotifierBase::start(oxen::quic::Loop& qloop) {
 
     log::info(cat, "Connected to SPNS hivemind");
 
-    register_service();
+    register_notifier();
 
     omq->add_timer(
             [this] {
-                register_service();
+                register_notifier();
 
                 std::map<std::string, int64_t> report;
 
@@ -381,13 +381,13 @@ void NotifierBase::start(oxen::quic::Loop& qloop) {
             15s);
 }
 
-void NotifierBase::register_service() {
+void NotifierBase::register_notifier() {
     oxenc::bt_dict_producer params;
     params.append("", REGISTER_PROTOCOL);
     params.append("max_body", MAX_BODY);
     omq->request(
             spns_cid,
-            "admin.register_service",
+            "admin.register_notifier",
             [this](bool ok, std::vector<std::string> data) {
                 if (ok && data.empty())
                     return;
