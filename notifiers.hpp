@@ -43,7 +43,8 @@ enum class SUBSCRIBE : int {
 // particularly useful.  (Also note that retries are not attempted across restarts).
 inline constexpr int MAX_ATTEMPTS = 11;
 
-// The version of the hivemind's register_service protocol we speak; the hivemind refuses any other.
+// The version of the hivemind's register_notifier protocol we speak; the hivemind refuses any
+// other.
 inline constexpr int REGISTER_PROTOCOL = 1;
 
 // Relative jitter for retry delay.  E.g. a draw from this returns 0.9 and our pre-jitter retry time
@@ -80,7 +81,7 @@ class NotifierBase {
     // Set when the hivemind refuses our registration, which stops the process (see run()).
     std::atomic<bool> registration_refused = false;
 
-    void register_service();
+    void register_notifier();
 
     HTTP2Notifier* hn = nullptr;
     std::function<Outcome(const notification& n, int code, const std::string& body)> classify;
@@ -101,9 +102,9 @@ class NotifierBase {
     // After endpoints are set up, call start().
     oxenmq::OxenMQ& init();
 
-    // Registers the `notifier` category endpoints that the hivemind calls (see the register_service
-    // documentation in spns/hivemind.cpp), sending pushes through `hn`, which must outlive the
-    // oxenmq instance:
+    // Registers the `notifier` category endpoints that the hivemind calls (see the
+    // register_notifier documentation in spns/hivemind.cpp), sending pushes through `hn`, which
+    // must outlive the oxenmq instance:
     //
     // - `validate` accepts a registration whose token `token_error` returns nullopt for, and
     //   rejects it with the returned message otherwise.
