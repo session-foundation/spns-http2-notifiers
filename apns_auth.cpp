@@ -4,6 +4,7 @@
 #include <gnutls/x509.h>
 #include <oxenc/hex.h>
 
+#include <algorithm>
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -12,6 +13,27 @@
 #include "util.hpp"
 
 namespace spns::notifier::apns {
+
+namespace {
+    void put_half(std::span<const unsigned char> v, std::span<unsigned char, 32> out, char name) {
+        auto first = std::ranges::find_if(v, [](unsigned char c) { return c != 0; });
+        v = v.subspan(first - v.begin());
+        if (v.size() > out.size())
+            throw std::runtime_error{"Invalid ES256 signature: {} is {} bytes ({})"_format(
+                    name, v.size(), oxenc::to_hex(v.begin(), v.end()))};
+        auto pad = out.size() - v.size();
+        std::fill_n(out.begin(), pad, 0);
+        std::ranges::copy(v, out.begin() + pad);
+    }
+}  // namespace
+
+std::array<unsigned char, 64> es256_signature(
+        std::span<const unsigned char> r, std::span<const unsigned char> s) {
+    std::array<unsigned char, 64> rs;
+    put_half(r, std::span{rs}.first<32>(), 'R');
+    put_half(s, std::span{rs}.last<32>(), 'S');
+    return rs;
+}
 
 AuthSigner::AuthSigner(
         std::string key_id_, std::string team_id_, const std::filesystem::path& privkey) :
@@ -44,41 +66,19 @@ std::pair<std::string, std::chrono::sys_seconds> AuthSigner::new_auth_token() {
     int rc = gnutls_privkey_sign_data(priv.get(), GNUTLS_DIG_SHA256, 0, &to_sign, &sig);
     if (rc < 0)
         throw std::runtime_error{"Failed to sign JWT: {}"_format(gnutls_strerror(rc))};
+    gnutls_bytes sig_data{sig.data};
 
-    // Extract the raw 64-byte R || S value for the JWT signature:
-    gnutls_datum_t r, s;
+    gnutls_datum_t r{}, s{};
     rc = gnutls_decode_rs_value(&sig, &r, &s);
-    if (rc < 0) {
-        gnutls_free(sig.data);
+    if (rc < 0)
         throw std::runtime_error{
                 "Failed to decode signature for JWT: {}"_format(gnutls_strerror(rc))};
-    }
-    // The above GNUTLS call is moronic in that it puts a 0 byte on the front to save me from myself
-    // in case I am so stupid as to think that an unsigned byte buffer with a high bit in the first
-    // byte means the value is negative (and apparently because that sort of stupidity is what the
-    // toxic dumpster more formerly known as ASN.1 requires).  So we have to work around that
-    // idiocy:
-    if (r.size < 32 || r.size > 33 || s.size < 32 || s.size > 33) {
-        gnutls_free(sig.data);
-        gnutls_free(r.data);
-        gnutls_free(s.data);
-        throw std::runtime_error{
-                "Internal error: expected 32 bytes for R and S, got {} ({}), {} ({})"_format(
-                        r.size,
-                        oxenc::to_hex(r.data, r.data + r.size),
-                        s.size,
-                        oxenc::to_hex(s.data, s.data + s.size))};
-    }
+    gnutls_bytes r_data{r.data}, s_data{s.data};
 
-    std::array<char, 64> rs;
-    std::memcpy(rs.data(), r.size == 33 ? r.data + 1 : r.data, 32);
-    std::memcpy(rs.data() + 32, s.size == 33 ? s.data + 1 : s.data, 32);
-    gnutls_free(sig.data);
-    gnutls_free(r.data);
-    gnutls_free(s.data);
+    auto rs = es256_signature({r.data, r.size}, {s.data, s.size});
 
     token += '.';
-    token += b64_url(std::string_view{rs.data(), rs.size()});
+    token += b64_url(std::string_view{reinterpret_cast<const char*>(rs.data()), rs.size()});
 
     return result;
 }

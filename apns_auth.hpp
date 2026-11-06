@@ -1,12 +1,22 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <filesystem>
+#include <span>
 #include <string>
 
 #include "auth_common.hpp"
 
 namespace spns::notifier::apns {
+
+// Converts the R and S integers of a P-256 ECDSA signature, as decoded from its DER encoding, to
+// the 64-byte R || S that JWS requires for ES256, each value left-padded with zeros to 32 bytes.
+// DER integers are minimal and signed, so a value may be shorter than 32 bytes, or 33 with a
+// leading 0x00 when its top bit is set.  Throws std::runtime_error if a value, without its leading
+// zeros, is longer than 32 bytes.
+std::array<unsigned char, 64> es256_signature(
+        std::span<const unsigned char> r, std::span<const unsigned char> s);
 
 class AuthSigner {
   private:
