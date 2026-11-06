@@ -213,7 +213,7 @@ HTTP2Notifier::HTTP2Notifier() {
             },
             this);
 
-    ignored_cleaner = loop.call_every(15s, [this] {
+    loop.add_timer(15s, [this] {
         auto now = std::chrono::system_clock::now();
         std::erase_if(ignored, [&now](const auto& i) { return now >= i.second; });
     });
