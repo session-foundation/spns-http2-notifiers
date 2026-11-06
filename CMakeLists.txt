@@ -57,4 +57,13 @@ add_executable(apns-notifier
 )
 target_link_libraries(apns-notifier PRIVATE spns-notifier)
 
+enable_testing()
+add_executable(apns-auth-test
+    tests/apns_auth_test.cpp
+    apns_auth.cpp
+)
+target_include_directories(apns-auth-test PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(apns-auth-test PRIVATE spns-notifier)
+add_test(NAME apns-auth COMMAND apns-auth-test)
+
 install(TARGETS firebase-notifier apns-notifier)

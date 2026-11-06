@@ -12,6 +12,10 @@ void privkey_deleter::operator()(gnutls_privkey_t priv) const noexcept {
     gnutls_privkey_deinit(priv);
 }
 
+void gnutls_free_deleter::operator()(void* p) const noexcept {
+    gnutls_free(p);
+}
+
 privkey_ptr load_privkey(std::string_view content) {
     gnutls_global_init();
 
