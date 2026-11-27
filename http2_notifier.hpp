@@ -2,7 +2,9 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <oxen/quic/loop.hpp>
 #include <string>
@@ -17,10 +19,15 @@ namespace spns::notifier {
 using namespace std::literals;
 
 class HTTP2Notifier {
-  public:
-    // Event loop used for HTTP.  Can also be used externally (e.g. for scheduling retries or auth
-    // token updates).
+    // Must be declared before `jq` (and so ahead of the public section), which runs on it.
     oxen::quic::Loop loop;
+
+  public:
+    // Job queue on the HTTP event loop thread, on which all of the notifier's own work runs.  Can
+    // also be used externally (e.g. for scheduling retries or auth token updates).  Anything still
+    // pending on it when the notifier is destroyed is dropped without being run, and it cannot be
+    // used at all after that.
+    oxen::quic::JobQueue jq{loop};
 
     // Version we send in notifications indicating our version (so that, in theory, clients can
     // treat our responses differently in case we need to coordinate a behavioural change with
@@ -40,8 +47,6 @@ class HTTP2Notifier {
     std::unordered_set<CURL*> handles;
 
     std::chrono::milliseconds req_timeout = 10s;
-
-    std::shared_ptr<oxen::quic::Ticker> ignored_cleaner;
 
     static int handle_socket_c(CURL* easy, curl_socket_t s, int action, void* userp, void* socketp);
     static int start_timeout_c(CURLM* multi, long timeout_ms, void* userp);
@@ -71,12 +76,22 @@ class HTTP2Notifier {
     virtual std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
             const notification& n) = 0;
 
+    // Cancels any ongoing requests and everything pending on `jq`, after which nothing more runs
+    // on the event loop thread on this object's behalf.  Does nothing if already called.
+    //
+    // Every subclass destructor must call this: `send_later` retries call `prepare()` from the
+    // event loop thread, and by the time ~HTTP2Notifier runs the subclass's members have already
+    // been destroyed and `prepare()` is a pure virtual call.
+    void shutdown();
+
   public:
     // Gracefully stops, waiting for any currently active requests to finish before this returns.
-    // This must not be called from within the event loop thread itself!
+    // Anything submitted after this is called (including pending `send_later` retries that come
+    // due) is dropped.  This must not be called from within the event loop thread itself!
     void stop();
 
-    // Stops and joins the curl thread, cancelling any ongoing requests.
+    // Stops and joins the curl thread, cancelling any ongoing requests (if the subclass destructor
+    // has not already done so via `shutdown()`, as it should have).
     virtual ~HTTP2Notifier();
 
     // Set the timeout for future requests.  Does not affect in-progress requests.
@@ -97,8 +112,9 @@ class HTTP2Notifier {
     // When we get the response (success or failure), the callback is invoked (if given) with the
     // result code and the token so that the caller can decide what to do with it.
     //
-    // The callback is *not* called if the input token is on the ignored token list, or if the
-    // request is cancelled (e.g. by object destruction) before the request completes.
+    // The callback is *not* called if the input token is on the ignored token list, if `stop()` has
+    // already been called, or if the request is cancelled (e.g. by object destruction) before the
+    // request completes.
     void send(
             notification n,
             std::function<void(notification n, int code, std::string resp_body)> callback);
@@ -121,7 +137,7 @@ class HTTP2Notifier {
     void ignore(std::string token, std::chrono::seconds ignore_for = 24h);
 };
 
-class FirebaseHTTP : public HTTP2Notifier {
+class FirebaseHTTP final : public HTTP2Notifier {
   public:
     // Constructs a curl FCM notifier.
     //
@@ -130,8 +146,11 @@ class FirebaseHTTP : public HTTP2Notifier {
     // (Note that auth tokens only last for hours, and need to be updated periodically).
     FirebaseHTTP(std::string_view project_id, std::string_view auth_token);
 
-    // Updates the authorization bearer token used for requests submitted after this call.
-    void update_auth_token(std::string auth_token);
+    ~FirebaseHTTP() override;
+
+    // Updates the authorization bearer token used for requests submitted after this call.  Can be
+    // called from any thread.
+    void update_auth_token(std::string_view auth_token);
 
   protected:
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
@@ -144,14 +163,13 @@ class FirebaseHTTP : public HTTP2Notifier {
     // when the auth token changes).  When such a change occurs we replace this shared pointer with
     // the new header list, but each request also has a shared_ptr copy of this (which it needs to
     // hold onto until the handle finishes).
-    std::shared_ptr<curl_slist> req_headers;
-
-    // Updates `req_headers` to a new linked list containing the common request headers plus the
-    // given auth token to insert into an Authorization header.
-    void replace_headers(std::string_view auth_token);
+    //
+    // Atomic because `prepare()` reads this on whichever thread called `send()`, concurrently with
+    // token updates.
+    std::atomic<std::shared_ptr<curl_slist>> req_headers;
 };
 
-class APNSHTTP : public HTTP2Notifier {
+class APNSHTTP final : public HTTP2Notifier {
   public:
     // Apple provides no clear guidance on this (because it's Apple: providing clear guidance would
     // be against their corporate policy), but recommendations seem to be about a day at most but
@@ -165,8 +183,11 @@ class APNSHTTP : public HTTP2Notifier {
     // be rotated before 1h).
     explicit APNSHTTP(std::string_view app_id, std::string_view auth_token, bool sandbox = false);
 
-    // Updates the authorization bearer token used for requests submitted after this call.
-    void update_auth_token(std::string auth_token);
+    ~APNSHTTP() override;
+
+    // Updates the authorization bearer token used for requests submitted after this call.  Can be
+    // called from any thread.
+    void update_auth_token(std::string_view auth_token);
 
   protected:
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
@@ -174,10 +195,10 @@ class APNSHTTP : public HTTP2Notifier {
 
   private:
     const std::string_view url_base;
-    std::string auth_header;
+    // Atomic because `prepare()` reads this on whichever thread called `send()`, concurrently with
+    // token updates.
+    std::atomic<std::shared_ptr<const std::string>> auth_header;
     const std::string topic_header;
-
-    void replace_auth_token(std::string_view auth_token);
 };
 
 }  // namespace spns::notifier

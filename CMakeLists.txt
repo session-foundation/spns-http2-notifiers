@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13...3.31)
 
 project(spns-http2-notifiers
-    VERSION 2.0.0
+    VERSION 2.1.0
     DESCRIPTION "Session Push Notification Server - HTTP2 notifiers"
     LANGUAGES C CXX)
 
@@ -14,7 +14,7 @@ pkg_check_modules(CLI11 CLI11>=2.1 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(SODIUM libsodium>=1.0.18 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(OXENC liboxenc>=1.5 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(FMT fmt>=9 IMPORTED_TARGET REQUIRED)
-pkg_check_modules(QUIC liboxenquic>=1.6 IMPORTED_TARGET REQUIRED)
+pkg_check_modules(QUIC_EVENT liboxenquic-event>=1.14 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(GNUTLS gnutls>=3.8 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(LIBEVENT_core libevent_core>=2.1 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(LIBEVENT_pthreads libevent_pthreads>=2.1 IMPORTED_TARGET REQUIRED)
@@ -38,7 +38,7 @@ target_link_libraries(spns-notifier
     PkgConfig::FMT
     PkgConfig::OXENC
     PkgConfig::SODIUM
-    PkgConfig::QUIC
+    PkgConfig::QUIC_EVENT
     PkgConfig::GNUTLS
     PkgConfig::LIBEVENT_core
     PkgConfig::LIBEVENT_pthreads
@@ -56,5 +56,14 @@ add_executable(apns-notifier
     apns_auth.cpp
 )
 target_link_libraries(apns-notifier PRIVATE spns-notifier)
+
+enable_testing()
+add_executable(apns-auth-test
+    tests/apns_auth_test.cpp
+    apns_auth.cpp
+)
+target_include_directories(apns-auth-test PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(apns-auth-test PRIVATE spns-notifier)
+add_test(NAME apns-auth COMMAND apns-auth-test)
 
 install(TARGETS firebase-notifier apns-notifier)

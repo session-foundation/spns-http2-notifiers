@@ -213,16 +213,16 @@ HTTP2Notifier::HTTP2Notifier() {
             },
             this);
 
-    ignored_cleaner = loop.call_every(15s, [this] {
+    jq.add_timer(15s, [this] {
         auto now = std::chrono::system_clock::now();
         std::erase_if(ignored, [&now](const auto& i) { return now >= i.second; });
     });
 }
 
 void HTTP2Notifier::stop() {
-    if (loop.inside())
+    if (jq.inside())
         throw std::logic_error{"Cannot stop HTTP2Notifier from within its own event loop thread!"};
-    auto [count, fut] = loop.call_get([this]() -> std::pair<size_t, std::future<void>> {
+    auto [count, fut] = jq.call_get([this]() -> std::pair<size_t, std::future<void>> {
         if (stopping)
             throw std::logic_error{"Cannot call stop() multiple times!"};
         stopping = true;
@@ -239,8 +239,15 @@ void HTTP2Notifier::stop() {
     log::info(cat, "HTTP2 notification client stopped.");
 }
 
-HTTP2Notifier::~HTTP2Notifier() {
+void HTTP2Notifier::shutdown() {
+    // Via the Loop's own queue rather than `jq`: a repeat call has to get onto the event loop
+    // thread to find out that it is one, and by then `jq` is stopped and refuses new jobs.
     loop.call_get([this] {
+        if (!multi)
+            return;
+
+        jq.stop();
+
         for (auto* h : handles) {
             curl_multi_remove_handle(multi, h);
             notify_context* ctx;
@@ -255,12 +262,16 @@ HTTP2Notifier::~HTTP2Notifier() {
     });
 }
 
+HTTP2Notifier::~HTTP2Notifier() {
+    shutdown();
+}
+
 void HTTP2Notifier::set_timeout(std::chrono::milliseconds timeout) {
-    loop.call([this, timeout] { req_timeout = timeout; });
+    jq.call([this, timeout] { req_timeout = timeout; });
 }
 
 void HTTP2Notifier::ignore(std::string token, std::chrono::seconds ignore_for) {
-    loop.call([this, token = std::move(token), ignore_for]() mutable {
+    jq.call([this, token = std::move(token), ignore_for]() mutable {
         ignored[std::move(token)] = std::chrono::system_clock::now() + ignore_for;
     });
 }
@@ -273,12 +284,19 @@ void HTTP2Notifier::send(
 
     log::trace(cat, "About to send this for notification to {}:\n{}", n.token, body);
 
-    loop.call([this,
-               n = std::move(n),
-               callback = std::move(callback),
-               url = std::move(url),
-               headers = std::move(headers),
-               body = std::move(body)]() mutable {
+    jq.call([this,
+             n = std::move(n),
+             callback = std::move(callback),
+             url = std::move(url),
+             headers = std::move(headers),
+             body = std::move(body)]() mutable {
+        // `last_stopped` is fulfilled once the requests active at stop() have drained; a request
+        // started after that would fulfil it a second time on completion, which throws.
+        if (stopping) {
+            log::debug(cat, "dropping send to {}: notifier is stopping", n.token);
+            return;
+        }
+
         if (ignored.count(n.token)) {
             log::trace(cat, "ignore send to {}: token is on ignore list", n.token);
             return;
@@ -318,21 +336,19 @@ void HTTP2Notifier::send_later(
         notification n,
         std::function<void(notification n, int code, std::string resp_body)> callback) {
 
-    loop.call_later(delay, [this, n = std::move(n), callback = std::move(callback)]() mutable {
-        // Don't submit a retry if we are shutting down.
-        if (!stopping)
-            send(std::move(n), std::move(callback));
+    jq.call_later(delay, [this, n = std::move(n), callback = std::move(callback)]() mutable {
+        send(std::move(n), std::move(callback));
     });
 }
 
 FirebaseHTTP::FirebaseHTTP(std::string_view project_id, std::string_view auth_token) :
         url{"https://fcm.googleapis.com/v1/projects/{}/messages:send"_format(project_id)} {
 
-    replace_headers(auth_token);
+    update_auth_token(auth_token);
 }
 
-void FirebaseHTTP::update_auth_token(std::string auth_token) {
-    loop.call([this, auth_token = std::move(auth_token)] { replace_headers(auth_token); });
+FirebaseHTTP::~FirebaseHTTP() {
+    shutdown();
 }
 
 template <std::same_as<std::string>... Header>
@@ -343,7 +359,7 @@ std::shared_ptr<curl_slist> make_headers(const Header&... s) {
     return {headers, [](curl_slist* headers) { curl_slist_free_all(headers); }};
 }
 
-void FirebaseHTTP::replace_headers(std::string_view auth_token) {
+void FirebaseHTTP::update_auth_token(std::string_view auth_token) {
     req_headers = make_headers(
             content_type_json, user_agent, "Authorization: Bearer {}"_format(auth_token));
     log::info(cat_firebase, "OAuth token updated");
@@ -353,7 +369,7 @@ std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> FirebaseHTTP::
         const notification& n) {
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> result;
     auto& [url, headers, body] = result;
-    headers = req_headers;
+    headers = req_headers.load();
     url = this->url;
     body = nlohmann::json{{"message",
                            {{"data",
@@ -372,14 +388,16 @@ APNSHTTP::APNSHTTP(std::string_view topic, std::string_view auth_token, bool san
                         : "https://api.push.apple.com/3/device/"sv},
         topic_header{"apns-topic: {}"_format(topic)} {
 
-    replace_auth_token(auth_token);
+    update_auth_token(auth_token);
 }
 
-void APNSHTTP::update_auth_token(std::string auth_token) {
-    loop.call([this, auth_token = std::move(auth_token)] { replace_auth_token(auth_token); });
+APNSHTTP::~APNSHTTP() {
+    shutdown();
 }
-void APNSHTTP::replace_auth_token(std::string_view auth_token) {
-    auth_header = "Authorization: bearer {}"_format(auth_token);
+
+void APNSHTTP::update_auth_token(std::string_view auth_token) {
+    auth_header =
+            std::make_shared<const std::string>("Authorization: bearer {}"_format(auth_token));
     log::info(cat_apns, "Auth token updated");
 }
 
@@ -388,10 +406,11 @@ std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> APNSHTTP::prep
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> result;
     auto& [url, headers, body] = result;
 
+    auto auth = auth_header.load();
     headers = make_headers(
             content_type_json,
             user_agent,
-            auth_header,
+            *auth,
             topic_header,
             "apns-push-type: alert"s,
             "apns-priority: 10"s,
