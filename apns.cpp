@@ -28,6 +28,11 @@ namespace spns::notifier::apns {
 namespace log = oxen::log;
 using namespace log::literals;
 
+// APNs device tokens vary in length: 32 bytes from a device, 80 from a simulator, and Apple asks
+// that no length be assumed.  The upper bound only keeps a junk value out of the database.
+constexpr size_t TOKEN_MIN_BYTES = 32;
+constexpr size_t TOKEN_MAX_BYTES = 100;
+
 int run(int argc, char* argv[]) {
 
     CLI::App app{"SPNS APNs notifier"};
@@ -80,7 +85,7 @@ int run(int argc, char* argv[]) {
     ncat.add_request_command("validate", [&nb](oxenmq::Message& m) {
         // notifier.validate: Called when a device registered for push notifications.  We get passed
         // some json containing the registration details.  Currently all we look for is a "token"
-        // key containing a length-64 hex value.
+        // key containing a hex value of TOKEN_MIN_BYTES to TOKEN_MAX_BYTES bytes.
         //
         // Returns a two-part or three-part value: a stringified numeric code from SUBSCRIBE, and an
         // opaque value for the main SPNS to store and feed back to us when this account is to be
@@ -115,17 +120,22 @@ int run(int argc, char* argv[]) {
                     "Unparseable JSON notification request data");
             return;
         }
-        if (token.size() != 64 || !oxenc::is_hex(token)) {
+        if (token.size() < oxenc::to_hex_size(TOKEN_MIN_BYTES) ||
+            token.size() > oxenc::to_hex_size(TOKEN_MAX_BYTES) || !oxenc::is_hex(token)) {
             log::warning(
                     cat,
-                    "notifier.validate called with invalid notification token: expected 64 hex "
-                    "digits, "
-                    "got {} (length {})",
+                    "notifier.validate called with invalid notification token: expected {}-{} hex "
+                    "digits, got {} (length {})",
+                    oxenc::to_hex_size(TOKEN_MIN_BYTES),
+                    oxenc::to_hex_size(TOKEN_MAX_BYTES),
                     token,
                     token.size());
             m.send_reply(
                     "{}"_format(static_cast<int>(SUBSCRIBE::BAD_INPUT)),
-                    "Invalid APNs device token (expected 64 hex, got {}B)"_format(token.size()));
+                    "Invalid APNs device token (expected {}-{} hex, got {}B)"_format(
+                            oxenc::to_hex_size(TOKEN_MIN_BYTES),
+                            oxenc::to_hex_size(TOKEN_MAX_BYTES),
+                            token.size()));
             return;
         }
         log::debug(cat, "notifier.validate validated token {}", token);
