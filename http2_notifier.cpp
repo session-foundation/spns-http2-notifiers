@@ -335,11 +335,7 @@ void HTTP2Notifier::send_later(
 FirebaseHTTP::FirebaseHTTP(std::string_view project_id, std::string_view auth_token) :
         url{"https://fcm.googleapis.com/v1/projects/{}/messages:send"_format(project_id)} {
 
-    replace_headers(auth_token);
-}
-
-void FirebaseHTTP::update_auth_token(std::string auth_token) {
-    jq.call([this, auth_token = std::move(auth_token)] { replace_headers(auth_token); });
+    update_auth_token(auth_token);
 }
 
 template <std::same_as<std::string>... Header>
@@ -350,7 +346,7 @@ std::shared_ptr<curl_slist> make_headers(const Header&... s) {
     return {headers, [](curl_slist* headers) { curl_slist_free_all(headers); }};
 }
 
-void FirebaseHTTP::replace_headers(std::string_view auth_token) {
+void FirebaseHTTP::update_auth_token(std::string_view auth_token) {
     req_headers = make_headers(
             content_type_json, user_agent, "Authorization: Bearer {}"_format(auth_token));
     log::info(cat_firebase, "OAuth token updated");
@@ -360,7 +356,7 @@ std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> FirebaseHTTP::
         const notification& n) {
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> result;
     auto& [url, headers, body] = result;
-    headers = req_headers;
+    headers = req_headers.load();
     url = this->url;
     body = nlohmann::json{{"message",
                            {{"data",
@@ -379,14 +375,12 @@ APNSHTTP::APNSHTTP(std::string_view topic, std::string_view auth_token, bool san
                         : "https://api.push.apple.com/3/device/"sv},
         topic_header{"apns-topic: {}"_format(topic)} {
 
-    replace_auth_token(auth_token);
+    update_auth_token(auth_token);
 }
 
-void APNSHTTP::update_auth_token(std::string auth_token) {
-    jq.call([this, auth_token = std::move(auth_token)] { replace_auth_token(auth_token); });
-}
-void APNSHTTP::replace_auth_token(std::string_view auth_token) {
-    auth_header = "Authorization: bearer {}"_format(auth_token);
+void APNSHTTP::update_auth_token(std::string_view auth_token) {
+    auth_header =
+            std::make_shared<const std::string>("Authorization: bearer {}"_format(auth_token));
     log::info(cat_apns, "Auth token updated");
 }
 
@@ -395,10 +389,11 @@ std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> APNSHTTP::prep
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> result;
     auto& [url, headers, body] = result;
 
+    auto auth = auth_header.load();
     headers = make_headers(
             content_type_json,
             user_agent,
-            auth_header,
+            *auth,
             topic_header,
             "apns-push-type: alert"s,
             "apns-priority: 10"s,

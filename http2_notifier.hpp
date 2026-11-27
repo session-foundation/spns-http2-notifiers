@@ -2,7 +2,9 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <oxen/quic/loop.hpp>
 #include <string>
@@ -135,8 +137,9 @@ class FirebaseHTTP : public HTTP2Notifier {
     // (Note that auth tokens only last for hours, and need to be updated periodically).
     FirebaseHTTP(std::string_view project_id, std::string_view auth_token);
 
-    // Updates the authorization bearer token used for requests submitted after this call.
-    void update_auth_token(std::string auth_token);
+    // Updates the authorization bearer token used for requests submitted after this call.  Can be
+    // called from any thread.
+    void update_auth_token(std::string_view auth_token);
 
   protected:
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
@@ -149,11 +152,10 @@ class FirebaseHTTP : public HTTP2Notifier {
     // when the auth token changes).  When such a change occurs we replace this shared pointer with
     // the new header list, but each request also has a shared_ptr copy of this (which it needs to
     // hold onto until the handle finishes).
-    std::shared_ptr<curl_slist> req_headers;
-
-    // Updates `req_headers` to a new linked list containing the common request headers plus the
-    // given auth token to insert into an Authorization header.
-    void replace_headers(std::string_view auth_token);
+    //
+    // Atomic because `prepare()` reads this on whichever thread called `send()`, concurrently with
+    // token updates.
+    std::atomic<std::shared_ptr<curl_slist>> req_headers;
 };
 
 class APNSHTTP : public HTTP2Notifier {
@@ -170,8 +172,9 @@ class APNSHTTP : public HTTP2Notifier {
     // be rotated before 1h).
     explicit APNSHTTP(std::string_view app_id, std::string_view auth_token, bool sandbox = false);
 
-    // Updates the authorization bearer token used for requests submitted after this call.
-    void update_auth_token(std::string auth_token);
+    // Updates the authorization bearer token used for requests submitted after this call.  Can be
+    // called from any thread.
+    void update_auth_token(std::string_view auth_token);
 
   protected:
     std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
@@ -179,10 +182,10 @@ class APNSHTTP : public HTTP2Notifier {
 
   private:
     const std::string_view url_base;
-    std::string auth_header;
+    // Atomic because `prepare()` reads this on whichever thread called `send()`, concurrently with
+    // token updates.
+    std::atomic<std::shared_ptr<const std::string>> auth_header;
     const std::string topic_header;
-
-    void replace_auth_token(std::string_view auth_token);
 };
 
 }  // namespace spns::notifier
