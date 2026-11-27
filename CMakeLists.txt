@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13...3.31)
 
 project(spns-http2-notifiers
-    VERSION 2.0.0
+    VERSION 2.1.0
     DESCRIPTION "Session Push Notification Server - HTTP2 notifiers"
     LANGUAGES C CXX)
 
