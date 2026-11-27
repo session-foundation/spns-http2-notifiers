@@ -76,7 +76,8 @@ class HTTP2Notifier {
 
   public:
     // Gracefully stops, waiting for any currently active requests to finish before this returns.
-    // This must not be called from within the event loop thread itself!
+    // Anything submitted after this is called (including pending `send_later` retries that come
+    // due) is dropped.  This must not be called from within the event loop thread itself!
     void stop();
 
     // Stops and joins the curl thread, cancelling any ongoing requests.
@@ -100,8 +101,9 @@ class HTTP2Notifier {
     // When we get the response (success or failure), the callback is invoked (if given) with the
     // result code and the token so that the caller can decide what to do with it.
     //
-    // The callback is *not* called if the input token is on the ignored token list, or if the
-    // request is cancelled (e.g. by object destruction) before the request completes.
+    // The callback is *not* called if the input token is on the ignored token list, if `stop()` has
+    // already been called, or if the request is cancelled (e.g. by object destruction) before the
+    // request completes.
     void send(
             notification n,
             std::function<void(notification n, int code, std::string resp_body)> callback);

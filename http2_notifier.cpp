@@ -281,6 +281,13 @@ void HTTP2Notifier::send(
              url = std::move(url),
              headers = std::move(headers),
              body = std::move(body)]() mutable {
+        // `last_stopped` is fulfilled once the requests active at stop() have drained; a request
+        // started after that would fulfil it a second time on completion, which throws.
+        if (stopping) {
+            log::debug(cat, "dropping send to {}: notifier is stopping", n.token);
+            return;
+        }
+
         if (ignored.count(n.token)) {
             log::trace(cat, "ignore send to {}: token is on ignore list", n.token);
             return;
@@ -321,9 +328,7 @@ void HTTP2Notifier::send_later(
         std::function<void(notification n, int code, std::string resp_body)> callback) {
 
     jq.call_later(delay, [this, n = std::move(n), callback = std::move(callback)]() mutable {
-        // Don't submit a retry if we are shutting down.
-        if (!stopping)
-            send(std::move(n), std::move(callback));
+        send(std::move(n), std::move(callback));
     });
 }
 
