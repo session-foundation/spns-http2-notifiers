@@ -21,6 +21,7 @@ class HTTP2Notifier {
     // Event loop used for HTTP.  Can also be used externally (e.g. for scheduling retries or auth
     // token updates).
     oxen::quic::Loop loop;
+    oxen::quic::JobQueue jq{loop};
 
     // Version we send in notifications indicating our version (so that, in theory, clients can
     // treat our responses differently in case we need to coordinate a behavioural change with

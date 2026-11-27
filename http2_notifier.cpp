@@ -213,16 +213,16 @@ HTTP2Notifier::HTTP2Notifier() {
             },
             this);
 
-    loop.add_timer(15s, [this] {
+    jq.add_timer(15s, [this] {
         auto now = std::chrono::system_clock::now();
         std::erase_if(ignored, [&now](const auto& i) { return now >= i.second; });
     });
 }
 
 void HTTP2Notifier::stop() {
-    if (loop.inside())
+    if (jq.inside())
         throw std::logic_error{"Cannot stop HTTP2Notifier from within its own event loop thread!"};
-    auto [count, fut] = loop.call_get([this]() -> std::pair<size_t, std::future<void>> {
+    auto [count, fut] = jq.call_get([this]() -> std::pair<size_t, std::future<void>> {
         if (stopping)
             throw std::logic_error{"Cannot call stop() multiple times!"};
         stopping = true;
@@ -240,7 +240,9 @@ void HTTP2Notifier::stop() {
 }
 
 HTTP2Notifier::~HTTP2Notifier() {
-    loop.call_get([this] {
+    jq.call_get([this] {
+        jq.stop();
+
         for (auto* h : handles) {
             curl_multi_remove_handle(multi, h);
             notify_context* ctx;
@@ -256,11 +258,11 @@ HTTP2Notifier::~HTTP2Notifier() {
 }
 
 void HTTP2Notifier::set_timeout(std::chrono::milliseconds timeout) {
-    loop.call([this, timeout] { req_timeout = timeout; });
+    jq.call([this, timeout] { req_timeout = timeout; });
 }
 
 void HTTP2Notifier::ignore(std::string token, std::chrono::seconds ignore_for) {
-    loop.call([this, token = std::move(token), ignore_for]() mutable {
+    jq.call([this, token = std::move(token), ignore_for]() mutable {
         ignored[std::move(token)] = std::chrono::system_clock::now() + ignore_for;
     });
 }
@@ -273,12 +275,12 @@ void HTTP2Notifier::send(
 
     log::trace(cat, "About to send this for notification to {}:\n{}", n.token, body);
 
-    loop.call([this,
-               n = std::move(n),
-               callback = std::move(callback),
-               url = std::move(url),
-               headers = std::move(headers),
-               body = std::move(body)]() mutable {
+    jq.call([this,
+             n = std::move(n),
+             callback = std::move(callback),
+             url = std::move(url),
+             headers = std::move(headers),
+             body = std::move(body)]() mutable {
         if (ignored.count(n.token)) {
             log::trace(cat, "ignore send to {}: token is on ignore list", n.token);
             return;
@@ -318,7 +320,7 @@ void HTTP2Notifier::send_later(
         notification n,
         std::function<void(notification n, int code, std::string resp_body)> callback) {
 
-    loop.call_later(delay, [this, n = std::move(n), callback = std::move(callback)]() mutable {
+    jq.call_later(delay, [this, n = std::move(n), callback = std::move(callback)]() mutable {
         // Don't submit a retry if we are shutting down.
         if (!stopping)
             send(std::move(n), std::move(callback));
@@ -332,7 +334,7 @@ FirebaseHTTP::FirebaseHTTP(std::string_view project_id, std::string_view auth_to
 }
 
 void FirebaseHTTP::update_auth_token(std::string auth_token) {
-    loop.call([this, auth_token = std::move(auth_token)] { replace_headers(auth_token); });
+    jq.call([this, auth_token = std::move(auth_token)] { replace_headers(auth_token); });
 }
 
 template <std::same_as<std::string>... Header>
@@ -376,7 +378,7 @@ APNSHTTP::APNSHTTP(std::string_view topic, std::string_view auth_token, bool san
 }
 
 void APNSHTTP::update_auth_token(std::string auth_token) {
-    loop.call([this, auth_token = std::move(auth_token)] { replace_auth_token(auth_token); });
+    jq.call([this, auth_token = std::move(auth_token)] { replace_auth_token(auth_token); });
 }
 void APNSHTTP::replace_auth_token(std::string_view auth_token) {
     auth_header = "Authorization: bearer {}"_format(auth_token);
