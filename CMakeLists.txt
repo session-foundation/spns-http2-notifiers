@@ -14,7 +14,7 @@ pkg_check_modules(CLI11 CLI11>=2.1 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(SODIUM libsodium>=1.0.18 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(OXENC liboxenc>=1.5 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(FMT fmt>=9 IMPORTED_TARGET REQUIRED)
-pkg_check_modules(QUIC liboxenquic>=1.13 IMPORTED_TARGET REQUIRED)
+pkg_check_modules(QUIC_EVENT liboxenquic-event>=1.14 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(GNUTLS gnutls>=3.8 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(LIBEVENT_core libevent_core>=2.1 IMPORTED_TARGET REQUIRED)
 pkg_check_modules(LIBEVENT_pthreads libevent_pthreads>=2.1 IMPORTED_TARGET REQUIRED)
@@ -38,7 +38,7 @@ target_link_libraries(spns-notifier
     PkgConfig::FMT
     PkgConfig::OXENC
     PkgConfig::SODIUM
-    PkgConfig::QUIC
+    PkgConfig::QUIC_EVENT
     PkgConfig::GNUTLS
     PkgConfig::LIBEVENT_core
     PkgConfig::LIBEVENT_pthreads
