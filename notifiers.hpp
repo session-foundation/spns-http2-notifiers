@@ -6,15 +6,18 @@
 #include <CLI/CLI.hpp>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <oxen/log.hpp>
 #include <oxen/log/format.hpp>
-#include <oxen/quic/loop.hpp>
 #include <random>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <unordered_set>
 
 namespace spns::notifier {
 
@@ -66,8 +69,6 @@ class NotifierBase {
     std::optional<oxenmq::OxenMQ> omq;
     oxenmq::ConnectionID spns_cid;
 
-    oxen::quic::Loop* loop = nullptr;
-
     std::deque<std::tuple<std::chrono::steady_clock::time_point, int64_t, int64_t, int64_t>>
             last_stats;
     std::mutex last_stats_mut;
@@ -104,7 +105,8 @@ class NotifierBase {
 
     // Registers the `notifier` category endpoints that the hivemind calls (see the
     // register_notifier documentation in spns/hivemind.cpp), sending pushes through `hn`, which
-    // must outlive the oxenmq instance:
+    // must outlive the oxenmq instance.  (`hn`'s job queue is also what start() and run() use to
+    // synchronize access to bad_tokens and for watchdog deadlock checks.)  The endpoints:
     //
     // - `validate` accepts a registration whose token `token_error` returns nullopt for, and
     //   rejects it with the returned message otherwise.
@@ -128,13 +130,9 @@ class NotifierBase {
     // - starts a periodic timer to propagate any bad tokens given with `bad_token()` back to
     //   hivemind to be removed from its database.
     //
-    // Takes and stores a reference to the quic::Loop object (which should be the one from the
-    // HTTP2Notifier) on which to synchronize access to bad_tokens and use for watchdog deadlock
-    // checks.
-    //
     // After this is called the notifier can add additional timers or do additional random things,
     // but then should call `run()` to give up control.
-    void start(oxen::quic::Loop& loop);
+    void start();
 
     // Runs forver.  This first tells systemd that we are started and starts a watchdog timer, then
     // sets up a signal handler to intercept INT and TERM signals to shut down gracefully and waits

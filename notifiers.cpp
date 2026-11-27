@@ -267,8 +267,8 @@ void NotifierBase::handle_response(notification n, int code, std::string body) {
     });
 }
 
-void NotifierBase::start(oxen::quic::Loop& qloop) {
-    loop = &qloop;
+void NotifierBase::start() {
+    assert(hn);  // Should have already called add_endpoints
 
     omq->start();
     log::info(cat, "Connecting to SPNS hivemind");
@@ -356,7 +356,7 @@ void NotifierBase::start(oxen::quic::Loop& qloop) {
 
     omq->add_timer(
             [this] {
-                auto bad = loop->call_get([this] {
+                auto bad = hn->jq.call_get([this] {
                     std::unordered_set<std::string> bad;
                     std::swap(bad, bad_tokens);
                     return bad;
@@ -415,11 +415,11 @@ void NotifierBase::register_notifier() {
 int NotifierBase::run() {
     sd_notify(0, "READY=1\nSTATUS=Started");
 
-    // Schedule our system status update timer through *both* OMQ and quic::Loop event loops so that
+    // Schedule our system status update timer through *both* OMQ and the HTTP event loop so that
     // if there is a problem with either one, we won't update it and the watchdog can kill us.
     omq->add_timer(
             [this] {
-                loop->call_get([this] {
+                hn->jq.call_get([this] {
                     int64_t s = stats.success, rs = stats.retry_success, f = stats.failures;
 
                     // Go look up our notification rate by looking for oldest value up to a minute
@@ -474,8 +474,8 @@ int NotifierBase::run() {
 }
 
 void NotifierBase::bad_token(std::string token) {
-    assert(loop);  // Should have already called start
-    loop->call([this, t = std::move(token)]() mutable { bad_tokens.insert(std::move(t)); });
+    assert(hn);  // Should have already called add_endpoints
+    hn->jq.call([this, t = std::move(token)]() mutable { bad_tokens.insert(std::move(t)); });
 }
 
 }  // namespace spns::notifier

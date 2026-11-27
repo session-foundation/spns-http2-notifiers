@@ -152,7 +152,7 @@ int run(int argc, char* argv[]) {
 
     log::info(cat, "SPNS APNs Notifier initialized, starting up");
 
-    nb.start(hn->loop);
+    nb.start();
 
     // Run this timer every 50m to refresh the token.  (There's no errors to worry about retrying
     // anything if it fails, because the token is simply a self-signed value.)

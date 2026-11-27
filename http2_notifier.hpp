@@ -17,10 +17,14 @@ namespace spns::notifier {
 using namespace std::literals;
 
 class HTTP2Notifier {
-  public:
-    // Event loop used for HTTP.  Can also be used externally (e.g. for scheduling retries or auth
-    // token updates).
+    // Must be declared before `jq` (and so ahead of the public section), which runs on it.
     oxen::quic::Loop loop;
+
+  public:
+    // Job queue on the HTTP event loop thread, on which all of the notifier's own work runs.  Can
+    // also be used externally (e.g. for scheduling retries or auth token updates).  Anything still
+    // pending on it when the notifier is destroyed is dropped without being run, and it cannot be
+    // used at all after that.
     oxen::quic::JobQueue jq{loop};
 
     // Version we send in notifications indicating our version (so that, in theory, clients can

@@ -140,7 +140,7 @@ int run(int argc, char* argv[]) {
 
     log::info(cat, "SPNS Firebase Notifier initialized, starting up");
 
-    nb.start(hn->loop);
+    nb.start();
 
     // Run this timer once a minute, refreshing if we have less than 20min validity left for the
     // token.  That way even if we get a failure, we can still retry 19 times before the token
