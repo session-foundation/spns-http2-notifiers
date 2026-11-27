@@ -76,13 +76,22 @@ class HTTP2Notifier {
     virtual std::tuple<std::string, std::shared_ptr<curl_slist>, std::string> prepare(
             const notification& n) = 0;
 
+    // Cancels any ongoing requests and everything pending on `jq`, after which nothing more runs
+    // on the event loop thread on this object's behalf.  Does nothing if already called.
+    //
+    // Every subclass destructor must call this: `send_later` retries call `prepare()` from the
+    // event loop thread, and by the time ~HTTP2Notifier runs the subclass's members have already
+    // been destroyed and `prepare()` is a pure virtual call.
+    void shutdown();
+
   public:
     // Gracefully stops, waiting for any currently active requests to finish before this returns.
     // Anything submitted after this is called (including pending `send_later` retries that come
     // due) is dropped.  This must not be called from within the event loop thread itself!
     void stop();
 
-    // Stops and joins the curl thread, cancelling any ongoing requests.
+    // Stops and joins the curl thread, cancelling any ongoing requests (if the subclass destructor
+    // has not already done so via `shutdown()`, as it should have).
     virtual ~HTTP2Notifier();
 
     // Set the timeout for future requests.  Does not affect in-progress requests.
@@ -128,7 +137,7 @@ class HTTP2Notifier {
     void ignore(std::string token, std::chrono::seconds ignore_for = 24h);
 };
 
-class FirebaseHTTP : public HTTP2Notifier {
+class FirebaseHTTP final : public HTTP2Notifier {
   public:
     // Constructs a curl FCM notifier.
     //
@@ -136,6 +145,8 @@ class FirebaseHTTP : public HTTP2Notifier {
     // auth_token is the initial auth token value to send for authentication (see google_auth.hpp).
     // (Note that auth tokens only last for hours, and need to be updated periodically).
     FirebaseHTTP(std::string_view project_id, std::string_view auth_token);
+
+    ~FirebaseHTTP() override;
 
     // Updates the authorization bearer token used for requests submitted after this call.  Can be
     // called from any thread.
@@ -158,7 +169,7 @@ class FirebaseHTTP : public HTTP2Notifier {
     std::atomic<std::shared_ptr<curl_slist>> req_headers;
 };
 
-class APNSHTTP : public HTTP2Notifier {
+class APNSHTTP final : public HTTP2Notifier {
   public:
     // Apple provides no clear guidance on this (because it's Apple: providing clear guidance would
     // be against their corporate policy), but recommendations seem to be about a day at most but
@@ -171,6 +182,8 @@ class APNSHTTP : public HTTP2Notifier {
     // fixed forever, but auth_token can be updated (Apple recommends at most every 20min, and must
     // be rotated before 1h).
     explicit APNSHTTP(std::string_view app_id, std::string_view auth_token, bool sandbox = false);
+
+    ~APNSHTTP() override;
 
     // Updates the authorization bearer token used for requests submitted after this call.  Can be
     // called from any thread.

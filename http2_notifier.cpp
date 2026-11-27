@@ -239,8 +239,13 @@ void HTTP2Notifier::stop() {
     log::info(cat, "HTTP2 notification client stopped.");
 }
 
-HTTP2Notifier::~HTTP2Notifier() {
-    jq.call_get([this] {
+void HTTP2Notifier::shutdown() {
+    // Via the Loop's own queue rather than `jq`: a repeat call has to get onto the event loop
+    // thread to find out that it is one, and by then `jq` is stopped and refuses new jobs.
+    loop.call_get([this] {
+        if (!multi)
+            return;
+
         jq.stop();
 
         for (auto* h : handles) {
@@ -255,6 +260,10 @@ HTTP2Notifier::~HTTP2Notifier() {
         multi = nullptr;
         event_free(ev_timeout);
     });
+}
+
+HTTP2Notifier::~HTTP2Notifier() {
+    shutdown();
 }
 
 void HTTP2Notifier::set_timeout(std::chrono::milliseconds timeout) {
@@ -338,6 +347,10 @@ FirebaseHTTP::FirebaseHTTP(std::string_view project_id, std::string_view auth_to
     update_auth_token(auth_token);
 }
 
+FirebaseHTTP::~FirebaseHTTP() {
+    shutdown();
+}
+
 template <std::same_as<std::string>... Header>
     requires(sizeof...(Header) > 0)
 std::shared_ptr<curl_slist> make_headers(const Header&... s) {
@@ -376,6 +389,10 @@ APNSHTTP::APNSHTTP(std::string_view topic, std::string_view auth_token, bool san
         topic_header{"apns-topic: {}"_format(topic)} {
 
     update_auth_token(auth_token);
+}
+
+APNSHTTP::~APNSHTTP() {
+    shutdown();
 }
 
 void APNSHTTP::update_auth_token(std::string_view auth_token) {
